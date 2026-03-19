@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kigali Transit — Live Bus Tracker</title>
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { width: 100%; height: 100%; overflow: hidden; font-family: 'Plus Jakarta Sans', sans-serif; }
+
+    .leaflet-control-zoom {
+      border: none !important; border-radius: 12px !important;
+      overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+    }
+    .leaflet-control-zoom a {
+      background: #1e293b !important; color: #94a3b8 !important;
+      border-bottom: 1px solid #334155 !important;
+      width: 34px !important; height: 34px !important; line-height: 34px !important; font-size: 18px !important;
+    }
+    .leaflet-control-zoom a:hover { background: #334155 !important; color: #fff !important; }
+    .leaflet-control-zoom-in  { border-radius: 12px 12px 0 0 !important; }
+    .leaflet-control-zoom-out { border-bottom: none !important; border-radius: 0 0 12px 12px !important; }
+    .leaflet-control-attribution {
+      background: rgba(15,23,42,0.82) !important; color: #475569 !important;
+      font-size: 9px !important; border-radius: 8px !important; padding: 3px 8px !important;
+    }
+    .leaflet-control-attribution a { color: #64748b !important; }
+
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+    @keyframes pulse-out {
+      0%   { transform: translate(-50%,-50%) scale(0.5); opacity: 0.9; }
+      100% { transform: translate(-50%,-50%) scale(2.8); opacity: 0; }
+    }
+    @keyframes blink  { 0%,100%{opacity:1} 50%{opacity:0.15} }
+    @keyframes fadeUp { from{transform:translateY(16px);opacity:0} to{transform:translateY(0);opacity:1} }
+    @keyframes spin   { to { transform: rotate(360deg); } }
+
+    .anim-up  { animation: fadeUp 0.25s cubic-bezier(0.34,1.56,0.64,1) both; }
+    .blink    { animation: blink 2.4s ease-in-out infinite; }
+    .btn      { cursor:pointer; border:none; outline:none; font-family:inherit; transition:all 0.15s; }
+    .btn:active { transform: scale(0.94); }
+    input { outline:none; font-family:inherit; }
+  </style>
+</head>
+<body>
+<div id="root" style="width:100%;height:100%;position:relative;"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ══════════════════════════════════════════════════════
+   ROUTE DEFINITIONS
+   Key stops along each route — OSRM will snap these to
+   real roads and return the full road geometry.
+══════════════════════════════════════════════════════ */
+const ROUTE_DEFS = [
+  {
+    id: 'route-a', name: 'Route A',
+    label: 'Nyabugogo → Kimironko', color: '#38bdf8',
+    stopIds: ['s1','s2','s3','s4','s5'],
+    // Key waypoints along the route — OSRM routes between them
+    viaPoints: [
+      [-1.9397, 30.0574], // Nyabugogo Terminal
+      [-1.9360, 30.0650], // via Kacyiru area
+      [-1.9280, 30.0810], // CBD
+      [-1.9244, 30.0892], // Remera junction
+      [-1.9220, 30.0938], // Kimironko
+    ],
+  },
+  {
+    id: 'route-b', name: 'Route B',
+    label: 'Remera → Downtown', color: '#fb923c',
+    stopIds: ['s6','s7','s8','s3'],
+    viaPoints: [
+      [-1.9552, 30.1098], // Remera Bus Park
+      [-1.9470, 30.0984], // Kanombe area
+      [-1.9414, 30.0910], // Sonatubes
+      [-1.9280, 30.0810], // CBD
+    ],
+  },
+  {
+    id: 'route-c', name: 'Route C',
+    label: 'Kicukiro → CBD', color: '#f472b6',
+    stopIds: ['s9','s10','s3','s2'],
+    viaPoints: [
+      [-1.9802, 30.0902], // Kicukiro Centre
+      [-1.9664, 30.0816], // Gikondo
+      [-1.9414, 30.0700], // via Nyamirambo
+      [-1.9280, 30.0810], // CBD
+      [-1.9336, 30.0700], // Kacyiru
+    ],
+  },
+];
+
+const STOPS = [
+  {id:'s1', name:'Nyabugogo Terminal', lat:-1.9397, lng:30.0574, routes:['Route A']},
+  {id:'s2', name:'Kacyiru Bus Park',   lat:-1.9336, lng:30.0700, routes:['Route A','Route C']},
+  {id:'s3', name:'CBD City Centre',    lat:-1.9280, lng:30.0810, routes:['Route A','Route B','Route C']},
+  {id:'s4', name:'Remera Junction',    lat:-1.9244, lng:30.0892, routes:['Route A']},
+  {id:'s5', name:'Kimironko Market',   lat:-1.9220, lng:30.0938, routes:['Route A']},
+  {id:'s6', name:'Remera Bus Park',    lat:-1.9552, lng:30.1098, routes:['Route B']},
+  {id:'s7', name:'Kanombe',            lat:-1.9470, lng:30.0984, routes:['Route B']},
+  {id:'s8', name:'Sonatubes',          lat:-1.9414, lng:30.0910, routes:['Route B']},
+  {id:'s9', name:'Kicukiro Centre',    lat:-1.9802, lng:30.0902, routes:['Route C']},
+  {id:'s10',name:'Gikondo',            lat:-1.9664, lng:30.0816, routes:['Route C']},
+];
+
+const NEXT_STOP_MAP = {
+  'route-a': ['Kacyiru Bus Park','CBD City Centre','Remera Junction','Kimironko Market'],
+  'route-b': ['Kanombe','Sonatubes','CBD City Centre'],
+  'route-c': ['Gikondo','CBD City Centre','Kacyiru Bus Park'],
+};
+const ROUTE_COLORS = {'Route A':'#38bdf8','Route B':'#fb923c','Route C':'#f472b6'};
+
+const BUSES_INIT = [
+  {id:'Bus 101',route:'Route A',rid:'route-a',speed:28,next:'Kacyiru Bus Park',   eta:'3 min',_p:0.00,status:'On Time',pax:24},
+  {id:'Bus 204',route:'Route A',rid:'route-a',speed:33,next:'CBD City Centre',    eta:'5 min',_p:0.22,status:'On Time',pax:39},
+  {id:'Bus 105',route:'Route B',rid:'route-b',speed:26,next:'Kanombe',            eta:'4 min',_p:0.00,status:'Delayed',pax:16},
+  {id:'Bus 210',route:'Route B',rid:'route-b',speed:36,next:'CBD City Centre',    eta:'6 min',_p:0.42,status:'On Time',pax:43},
+  {id:'Bus 301',route:'Route C',rid:'route-c',speed:31,next:'Gikondo',            eta:'5 min',_p:0.00,status:'On Time',pax:30},
+  {id:'Bus 318',route:'Route C',rid:'route-c',speed:23,next:'CBD City Centre',    eta:'8 min',_p:0.40,status:'On Time',pax:32},
+  {id:'Bus 412',route:'Route A',rid:'route-a',speed:30,next:'Remera Junction',    eta:'4 min',_p:0.55,status:'On Time',pax:19},
+  {id:'Bus 503',route:'Route B',rid:'route-b',speed:28,next:'Sonatubes',          eta:'7 min',_p:0.21,status:'Delayed',pax:22},
+];
+
+const lerp = (a,b,t) => a + (b-a)*t;
+
+/* ══════════════════════════════════════════════════════
+   OSRM — get road-snapped route geometry
+   Public OSRM demo server, free, no key needed.
+   Returns array of [lat, lng] points following real roads.
+══════════════════════════════════════════════════════ */
+async function fetchOSRMRoute(viaPoints) {
+  // OSRM expects lng,lat order in the URL
+  const coords = viaPoints.map(([lat,lng]) => `${lng},${lat}`).join(';');
+  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+
+  const res  = await fetch(url);
+  const data = await res.json();
+
+  if (data.code !== 'Ok' || !data.routes?.length) {
+    throw new Error(`OSRM error: ${data.code}`);
+  }
+
+  // GeoJSON coords are [lng, lat] — flip to [lat, lng] for Leaflet
+  return data.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+}
+
+/* ══════════════════════════════════════════════════════
+   ARRIVAL ESTIMATE
+══════════════════════════════════════════════════════ */
+function calcArrivals(stopId, buses, routeCoords) {
+  const stop = STOPS.find(s => s.id === stopId);
+  if (!stop) return [];
+
+  return buses
+    .filter(bus => {
+      const def = ROUTE_DEFS.find(r => r.id === bus.rid);
+      return def?.stopIds.includes(stopId);
+    })
+    .map(bus => {
+      const d    = Math.hypot(bus.lat - stop.lat, bus.lng - stop.lng);
+      const mins = Math.max(1, Math.round(d * 9000));
+      return { busId:bus.id, rid:bus.rid, mins, eta:`${mins} min` };
+    })
+    .sort((a,b) => a.mins - b.mins)
+    .slice(0, 4);
+}
+
+/* ══════════════════════════════════════════════════════
+   POSITION ALONG ROAD — given 0..1 progress on a
+   road-following polyline, return interpolated [lat,lng]
+══════════════════════════════════════════════════════ */
+function positionAlongRoute(coords, progress) {
+  if (!coords || coords.length < 2) return null;
+  const total = coords.length - 1;
+  const raw   = progress * total;
+  const i     = Math.min(Math.floor(raw), total - 1);
+  const t     = raw - i;
+  const A     = coords[i];
+  const B     = coords[i + 1];
+  return [lerp(A[0],B[0],t), lerp(A[1],B[1],t)];
+}
+
+/* ══════════════════════════════════════════════════════
+   SIMULATION HOOK
+   Bus _p is now 0..1 (fraction of road progress).
+══════════════════════════════════════════════════════ */
+function useSimulation(routeCoords) {
+  const [buses,   setBuses]   = useState([]);
+  const [running, setRunning] = useState(true);
+  const stateRef = useRef([]);
+  const timerRef = useRef(null);
+
+  // Init buses once route coords are loaded
+  useEffect(() => {
+    if (!routeCoords || Object.keys(routeCoords).length === 0) return;
+    const initialized = BUSES_INIT.map(bus => {
+      const coords = routeCoords[bus.rid];
+      const pos    = coords ? positionAlongRoute(coords, bus._p) : null;
+      return {
+        ...bus,
+        lat: pos ? pos[0] : 0,
+        lng: pos ? pos[1] : 0,
+      };
+    });
+    stateRef.current = initialized;
+    setBuses(initialized);
+  }, [routeCoords]);
+
+  const tick = useCallback(() => {
+    if (!routeCoords || stateRef.current.length === 0) return;
+
+    stateRef.current = stateRef.current.map(bus => {
+      const coords = routeCoords[bus.rid];
+      if (!coords) return bus;
+
+      let p = bus._p + 0.004 + Math.random() * 0.003;
+      if (p >= 1) p = 0;
+
+      const pos   = positionAlongRoute(coords, p);
+      if (!pos) return bus;
+
+      const speed = Math.round(Math.max(14, bus.speed + (Math.random()-.5)*7));
+      const eta   = `${Math.max(1, Math.round((1-p) * 18))} min`;
+      const arr   = NEXT_STOP_MAP[bus.rid] || [bus.next];
+      const next  = arr[Math.floor(p * arr.length) % arr.length] || bus.next;
+
+      return { ...bus, lat: pos[0], lng: pos[1], _p: p, speed, eta, next };
+    });
+
+    setBuses([...stateRef.current]);
+  }, [routeCoords]);
+
+  useEffect(() => {
+    if (running && stateRef.current.length > 0) {
+      timerRef.current = setInterval(tick, 3000);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [running, tick, buses.length]);
+
+  return { buses, running, toggle: () => setRunning(v => !v) };
+}
+
+/* ══════════════════════════════════════════════════════
+   MARKER ICONS
+══════════════════════════════════════════════════════ */
+function makeBusIcon(L, color, selected) {
+  const s = selected ? 42 : 34;
+  const html = `
+    <div style="position:relative;width:${s}px;height:${s}px;">
+      ${selected ? `<div style="position:absolute;top:50%;left:50%;width:64px;height:64px;border-radius:50%;background:${color}22;transform:translate(-50%,-50%);animation:pulse-out 1.8s ease-out infinite;pointer-events:none;"></div>` : ''}
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:${s}px;height:${s}px;background:linear-gradient(145deg,${color},${color}bb);border-radius:${selected?11:9}px;border:${selected?'2.5px solid #fff':'2px solid '+color+'55'};box-shadow:0 4px 18px ${color}66;display:flex;align-items:center;justify-content:center;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="white">
+          <rect x="2" y="4" width="20" height="14" rx="3"/>
+          <rect x="4" y="2" width="16" height="4" rx="1"/>
+          <circle cx="7" cy="20" r="2"/><circle cx="17" cy="20" r="2"/>
+          <rect x="2" y="10" width="20" height="2" fill="rgba(0,0,0,0.15)"/>
+          <rect x="5"  y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.5)"/>
+          <rect x="10" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.5)"/>
+          <rect x="15" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.5)"/>
+        </svg>
+      </div>
+    </div>`;
+  return L.divIcon({ className:'', html, iconSize:[s,s], iconAnchor:[s/2,s/2] });
+}
+
+function makeStopIcon(L, selected) {
+  const html = `
+    <div style="position:relative;width:16px;height:16px;display:flex;align-items:center;justify-content:center;">
+      ${selected ? `<div style="position:absolute;top:50%;left:50%;width:28px;height:28px;border-radius:50%;border:1.5px solid #38bdf855;transform:translate(-50%,-50%);animation:pulse-out 1.6s ease-out infinite;"></div>` : ''}
+      <div style="width:12px;height:12px;border-radius:50%;background:${selected?'#38bdf8':'#fff'};border:2.5px solid #38bdf8;box-shadow:0 0 ${selected?12:5}px #38bdf8${selected?'99':'44'};"></div>
+    </div>`;
+  return L.divIcon({ className:'', html, iconSize:[16,16], iconAnchor:[8,8] });
+}
+
+/* ══════════════════════════════════════════════════════
+   ARROW DECORATOR — draws chevron arrows along polylines
+══════════════════════════════════════════════════════ */
+function addArrowDecorator(L, polyline, color) {
+  // Manually place arrow heads along the line using L.polyline
+  // We use a custom SVG-based approach since Leaflet.PolylineDecorator
+  // isn't loaded — instead we draw small rotated arrow markers
+  // at regular intervals using DivIcons.
+  // A simpler approach: use CSS-styled dashes to imply direction.
+  // We'll just use a dashed overlay line for direction hint.
+  const arrowLine = L.polyline(polyline.getLatLngs(), {
+    color, weight: 0, opacity: 0, interactive: false,
+  });
+  return arrowLine;
+}
+
+/* ══════════════════════════════════════════════════════
+   MAP COMPONENT
+══════════════════════════════════════════════════════ */
+function MapView({ buses, routeCoords, selBus, selStop, selRoute, onBusClick, onStopClick }) {
+  const containerRef = useRef(null);
+  const mapRef       = useRef(null);
+  const busMarkers   = useRef({});
+  const stopMarkers  = useRef({});
+  const polylines    = useRef({});
+  const glowLines    = useRef({});
+
+  /* ── Init map ── */
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+    const L = window.L;
+
+    const map = L.map(containerRef.current, {
+      center: [-1.952, 30.081],
+      zoom: 13,
+      zoomControl: false,
+      preferCanvas: true,
+    });
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    }).addTo(map);
+
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    // Draw stop markers
+    STOPS.forEach(stop => {
+      const mk = L.marker([stop.lat, stop.lng], {
+        icon: makeStopIcon(L, false), zIndexOffset: 200,
+      }).addTo(map).on('click', () => onStopClick(stop));
+      stopMarkers.current[stop.id] = mk;
+    });
+
+    mapRef.current = map;
+    setTimeout(() => map.invalidateSize(), 100);
+
+    return () => { map.remove(); mapRef.current = null; };
+  }, []);
+
+  /* ── Draw road-following routes once OSRM data arrives ── */
+  useEffect(() => {
+    const L   = window.L;
+    const map = mapRef.current;
+    if (!map || !L || Object.keys(routeCoords).length === 0) return;
+
+    // Remove old polylines
+    Object.values(polylines.current).forEach(p => p.remove());
+    Object.values(glowLines.current).forEach(p => p.remove());
+    polylines.current = {};
+    glowLines.current = {};
+
+    ROUTE_DEFS.forEach(def => {
+      const coords = routeCoords[def.id];
+      if (!coords || coords.length < 2) return;
+
+      // Glow layer
+      const glow = L.polyline(coords, {
+        color: def.color, weight: 14, opacity: 0.10,
+        lineCap: 'round', lineJoin: 'round', interactive: false,
+      }).addTo(map);
+      glowLines.current[def.id] = glow;
+
+      // Main route line
+      const poly = L.polyline(coords, {
+        color: def.color, weight: 5, opacity: 0.85,
+        lineCap: 'round', lineJoin: 'round',
+      }).addTo(map);
+      polylines.current[def.id] = poly;
+
+      // Direction arrows — place SVG arrow divIcons every ~30 points
+      const step = Math.max(1, Math.floor(coords.length / 12));
+      for (let i = step; i < coords.length - 1; i += step) {
+        const A = coords[i - 1];
+        const B = coords[i];
+        const angle = Math.atan2(B[1]-A[1], B[0]-A[0]) * 180 / Math.PI;
+        const arrowHtml = `
+          <div style="transform:rotate(${angle}deg);width:14px;height:14px;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+            <svg viewBox="0 0 10 10" width="10" height="10" fill="${def.color}" opacity="0.75">
+              <polygon points="5,0 10,10 5,7 0,10"/>
+            </svg>
+          </div>`;
+        const arrowIcon = L.divIcon({ className:'', html:arrowHtml, iconSize:[14,14], iconAnchor:[7,7] });
+        L.marker(coords[i], { icon:arrowIcon, interactive:false, zIndexOffset:150 }).addTo(map);
+      }
+    });
+  }, [routeCoords]);
+
+  /* ── Update bus markers ── */
+  useEffect(() => {
+    const L   = window.L;
+    const map = mapRef.current;
+    if (!map || !L || buses.length === 0) return;
+
+    buses.forEach(bus => {
+      if (!bus.lat || !bus.lng) return;
+      const isSel = selBus?.id === bus.id;
+      const route = ROUTE_DEFS.find(r => r.id === bus.rid);
+      const color = route?.color || '#38bdf8';
+
+      if (busMarkers.current[bus.id]) {
+        busMarkers.current[bus.id].setLatLng([bus.lat, bus.lng]);
+        busMarkers.current[bus.id].setIcon(makeBusIcon(L, color, isSel));
+        busMarkers.current[bus.id].off('click').on('click', () => onBusClick(bus));
+      } else {
+        const mk = L.marker([bus.lat, bus.lng], {
+          icon: makeBusIcon(L, color, isSel), zIndexOffset: 1000,
+        }).addTo(map).on('click', () => onBusClick(bus));
+        busMarkers.current[bus.id] = mk;
+      }
+    });
+  }, [buses, selBus]);
+
+  /* ── Stop highlights ── */
+  useEffect(() => {
+    const L = window.L;
+    if (!mapRef.current || !L) return;
+    STOPS.forEach(stop => {
+      const mk = stopMarkers.current[stop.id];
+      if (!mk) return;
+      mk.setIcon(makeStopIcon(L, selStop?.id === stop.id));
+      mk.off('click').on('click', () => onStopClick(stop));
+    });
+  }, [selStop]);
+
+  /* ── Route dim/highlight ── */
+  useEffect(() => {
+    if (!mapRef.current) return;
+    ROUTE_DEFS.forEach(def => {
+      const poly = polylines.current[def.id];
+      const glow = glowLines.current[def.id];
+      if (!poly) return;
+      if (!selRoute || selRoute === def.id) {
+        poly.setStyle({ opacity: 0.9, weight: selRoute === def.id ? 7 : 5 });
+        glow?.setStyle({ opacity: selRoute === def.id ? 0.18 : 0.10 });
+      } else {
+        poly.setStyle({ opacity: 0.12, weight: 3 });
+        glow?.setStyle({ opacity: 0.03 });
+      }
+    });
+  }, [selRoute]);
+
+  /* ── Fly to selected bus ── */
+  useEffect(() => {
+    if (selBus && mapRef.current)
+      mapRef.current.flyTo([selBus.lat, selBus.lng], 15, { duration: 1.0 });
+  }, [selBus?.id]);
+
+  /* ── Fly to selected stop ── */
+  useEffect(() => {
+    if (selStop && mapRef.current)
+      mapRef.current.flyTo([selStop.lat, selStop.lng], 15, { duration: 1.0 });
+  }, [selStop?.id]);
+
+  return <div ref={containerRef} style={{position:'absolute',inset:0,zIndex:1}}/>;
+}
+
+/* ══════════════════════════════════════════════════════
+   LOADING OVERLAY
+══════════════════════════════════════════════════════ */
+function LoadingOverlay({ status }) {
+  return (
+    <div style={{position:'absolute',inset:0,zIndex:100,background:'#0f172a',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:'20px'}}>
+      <div style={{width:'56px',height:'56px',borderRadius:'16px',background:'linear-gradient(135deg,#0ea5e9,#38bdf8)',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 0 40px #38bdf830'}}>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="white">
+          <rect x="2" y="4" width="20" height="14" rx="3"/><rect x="4" y="2" width="16" height="4" rx="1"/>
+          <circle cx="7" cy="20" r="2"/><circle cx="17" cy="20" r="2"/>
+          <rect x="5" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.4)"/>
+          <rect x="10" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.4)"/>
+          <rect x="15" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.4)"/>
+        </svg>
+      </div>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontFamily:"'DM Mono',monospace",color:'#e2e8f0',fontSize:'18px',fontWeight:500,letterSpacing:'2px',marginBottom:'8px'}}>KIGALI TRANSIT</div>
+        <div style={{color:'#64748b',fontSize:'13px',marginBottom:'16px'}}>{status}</div>
+        <div style={{display:'flex',justifyContent:'center',gap:'6px'}}>
+          {[0,1,2].map(i => (
+            <div key={i} style={{width:'6px',height:'6px',borderRadius:'50%',background:'#38bdf8',animation:`blink 1.2s ease-in-out ${i*0.2}s infinite`}} />
+          ))}
+        </div>
+      </div>
+      <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'12px 18px',maxWidth:'340px',textAlign:'center'}}>
+        <div style={{color:'#475569',fontSize:'11px',lineHeight:1.7,fontFamily:"'DM Mono',monospace"}}>
+          Fetching road routes from<br/>
+          <span style={{color:'#38bdf8'}}>router.project-osrm.org</span><br/>
+          <span style={{color:'#334155',fontSize:'10px'}}>Free · OpenStreetMap data · No API key</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   SIDEBAR
+══════════════════════════════════════════════════════ */
+function Sidebar({ buses, selBus, selStop, selRoute, onBus, onStop, onRoute, open, onToggle, running, onPause }) {
+  const [q,   setQ]   = useState('');
+  const [tab, setTab] = useState('buses');
+
+  const fbuses = buses.filter(b => {
+    const lq = q.toLowerCase();
+    return (!selRoute || b.rid === selRoute)
+      && (!lq || b.id.toLowerCase().includes(lq) || b.route.toLowerCase().includes(lq) || b.next.toLowerCase().includes(lq));
+  });
+  const fstops = STOPS.filter(s => !q || s.name.toLowerCase().includes(q.toLowerCase()));
+
+  const W = 308;
+  const S = { bg:'#0f172a', bg2:'#1e293b', border:'#1e293b', border2:'#334155', text:'#e2e8f0', muted:'#64748b' };
+
+  return (
+    <div style={{position:'absolute',top:0,left:0,height:'100%',zIndex:20,pointerEvents:'auto',display:'flex'}}>
+      <button onClick={onToggle} className="btn" style={{position:'absolute',top:'18px',left:open?`${W+8}px`:'18px',transition:'left 0.3s cubic-bezier(0.4,0,0.2,1)',zIndex:30,width:'28px',height:'28px',borderRadius:'50%',background:S.bg2,border:`1px solid ${S.border2}`,color:'#94a3b8',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'15px',boxShadow:'0 4px 16px rgba(0,0,0,0.4)'}}>
+        {open ? '‹' : '›'}
+      </button>
+
+      <div style={{width:open?`${W}px`:'0',overflow:'hidden',transition:'width 0.3s cubic-bezier(0.4,0,0.2,1)',height:'100%',background:S.bg,borderRight:`1px solid ${S.border}`,boxShadow:'6px 0 40px rgba(0,0,0,0.4)',display:'flex',flexDirection:'column'}}>
+        <div style={{minWidth:`${W}px`,display:'flex',flexDirection:'column',height:'100%'}}>
+
+          {/* header */}
+          <div style={{padding:'18px 16px 14px',borderBottom:`1px solid ${S.border}`,background:'linear-gradient(160deg,#162033,#0f172a)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'14px'}}>
+              <div style={{width:'40px',height:'40px',borderRadius:'12px',flexShrink:0,background:'linear-gradient(135deg,#0ea5e9,#38bdf8)',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 4px 16px rgba(56,189,248,0.3)'}}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                  <rect x="2" y="4" width="20" height="14" rx="3"/>
+                  <rect x="4" y="2" width="16" height="4" rx="1"/>
+                  <circle cx="7" cy="20" r="2"/><circle cx="17" cy="20" r="2"/>
+                  <rect x="5" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.45)"/>
+                  <rect x="10" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.45)"/>
+                  <rect x="15" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.45)"/>
+                </svg>
+              </div>
+              <div>
+                <div style={{fontFamily:"'DM Mono',monospace",fontWeight:500,fontSize:'13px',letterSpacing:'2px',background:'linear-gradient(90deg,#e2e8f0,#38bdf8)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>KIGALI TRANSIT</div>
+                <div style={{color:'#475569',fontSize:'11px',marginTop:'2px',display:'flex',alignItems:'center',gap:'4px'}}>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="#38bdf8"><path d="M17 8C8 10 5.9 16.17 3.82 21.34L5.71 22l1-2.3A4.49 4.49 0 008 20c9 0 14-8 14-8S18 10 17 8z"/></svg>
+                  OSM + OSRM roads
+                </div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:'8px',background:'rgba(255,255,255,0.03)',border:`1px solid ${S.border2}`,borderRadius:'10px',padding:'8px 12px'}}>
+              <div className="blink" style={{width:'8px',height:'8px',borderRadius:'50%',flexShrink:0,background:running?'#4ade80':'#f87171',boxShadow:`0 0 8px ${running?'#4ade80':'#f87171'}`}} />
+              <span style={{fontFamily:"'DM Mono',monospace",fontSize:'11px',color:'#94a3b8',flex:1}}>{running ? 'LIVE · 3s interval' : 'PAUSED'}</span>
+              <button onClick={onPause} className="btn" style={{padding:'3px 10px',borderRadius:'7px',fontFamily:"'DM Mono',monospace",fontSize:'10px',fontWeight:500,background:running?'rgba(248,113,113,0.12)':'rgba(74,222,128,0.12)',color:running?'#f87171':'#4ade80',border:`1px solid ${running?'rgba(248,113,113,0.25)':'rgba(74,222,128,0.25)'}`}}>
+                {running ? 'PAUSE' : 'RESUME'}
+              </button>
+            </div>
+          </div>
+
+          {/* search */}
+          <div style={{padding:'10px 12px',borderBottom:`1px solid ${S.border}`}}>
+            <div style={{position:'relative'}}>
+              <svg style={{position:'absolute',left:'10px',top:'50%',transform:'translateY(-50%)',pointerEvents:'none'}} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+              <input type="text" value={q} onChange={e=>setQ(e.target.value)} placeholder="Search buses, stops…"
+                style={{width:'100%',paddingLeft:'30px',paddingRight:q?'28px':'10px',paddingTop:'8px',paddingBottom:'8px',background:S.bg2,border:`1px solid ${S.border2}`,borderRadius:'9px',color:'#e2e8f0',fontSize:'12px',transition:'border-color 0.2s'}}
+                onFocus={e=>e.target.style.borderColor='#38bdf8'}
+                onBlur={e =>e.target.style.borderColor=S.border2}
+              />
+              {q && <button onClick={()=>setQ('')} style={{position:'absolute',right:'8px',top:'50%',transform:'translateY(-50%)',background:'none',border:'none',color:'#475569',cursor:'pointer',fontSize:'13px',padding:0}}>✕</button>}
+            </div>
+          </div>
+
+          {/* route filter */}
+          <div style={{padding:'10px 12px',borderBottom:`1px solid ${S.border}`}}>
+            <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'10px',fontWeight:500,marginBottom:'8px',letterSpacing:'1px'}}>FILTER BY ROUTE</div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
+              <button onClick={()=>onRoute(null)} className="btn" style={{padding:'4px 12px',borderRadius:'999px',fontSize:'11px',fontWeight:600,background:!selRoute?'#e2e8f0':'transparent',color:!selRoute?'#0f172a':'#64748b',border:`1px solid ${!selRoute?'#e2e8f0':S.border2}`}}>All</button>
+              {ROUTE_DEFS.map(r => (
+                <button key={r.id} onClick={()=>onRoute(selRoute===r.id?null:r.id)} className="btn"
+                  style={{padding:'4px 12px',borderRadius:'999px',fontFamily:"'DM Mono',monospace",fontSize:'11px',fontWeight:500,background:selRoute===r.id?r.color+'22':'transparent',color:r.color,border:`1px solid ${selRoute===r.id?r.color:r.color+'55'}`,boxShadow:selRoute===r.id?`0 0 10px ${r.color}33`:'none'}}>
+                  {r.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* tabs */}
+          <div style={{display:'flex',borderBottom:`1px solid ${S.border}`}}>
+            {['buses','stops'].map(t => (
+              <button key={t} onClick={()=>setTab(t)} className="btn" style={{flex:1,padding:'10px 0',fontFamily:"'DM Mono',monospace",fontSize:'10px',fontWeight:500,letterSpacing:'1px',textTransform:'uppercase',color:tab===t?'#38bdf8':'#334155',borderBottom:tab===t?'2px solid #38bdf8':'2px solid transparent',background:'none',cursor:'pointer',transition:'color 0.2s'}}>
+                {t==='buses' ? `Buses (${fbuses.length})` : `Stops (${fstops.length})`}
+              </button>
+            ))}
+          </div>
+
+          {/* list */}
+          <div style={{flex:1,overflowY:'auto',padding:'8px'}}>
+            {tab==='buses' && fbuses.map(bus => {
+              const route = ROUTE_DEFS.find(r => r.id === bus.rid);
+              const rc    = route?.color || '#38bdf8';
+              const isSel = selBus?.id === bus.id;
+              return (
+                <button key={bus.id} onClick={()=>onBus(isSel?null:bus)} className="btn"
+                  style={{width:'100%',textAlign:'left',padding:'11px',borderRadius:'13px',marginBottom:'5px',cursor:'pointer',background:isSel?`${rc}12`:S.bg2,border:`1px solid ${isSel?rc+'66':S.border2}`,boxShadow:isSel?`0 0 24px ${rc}18`:'none',transition:'all 0.2s'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:'9px',marginBottom:'8px'}}>
+                    <div style={{width:'30px',height:'30px',borderRadius:'9px',background:`linear-gradient(135deg,${rc},${rc}b0)`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,boxShadow:`0 3px 10px ${rc}44`}}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="white"><rect x="2" y="4" width="20" height="14" rx="3"/><rect x="4" y="2" width="16" height="4" rx="1"/><circle cx="7" cy="20" r="2"/><circle cx="17" cy="20" r="2"/></svg>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                        <span style={{fontFamily:"'DM Mono',monospace",color:'#e2e8f0',fontSize:'13px',fontWeight:500}}>{bus.id}</span>
+                        <span style={{fontSize:'9px',fontWeight:600,padding:'2px 7px',borderRadius:'999px',fontFamily:"'DM Mono',monospace",background:bus.status==='On Time'?'rgba(74,222,128,0.1)':'rgba(251,146,60,0.1)',color:bus.status==='On Time'?'#4ade80':'#fb923c',border:`1px solid ${bus.status==='On Time'?'rgba(74,222,128,0.2)':'rgba(251,146,60,0.2)'}`}}>{bus.status}</span>
+                      </div>
+                      <div style={{color:'#475569',fontSize:'11px',marginTop:'1px'}}>{bus.route}</div>
+                    </div>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'4px',marginBottom:'7px'}}>
+                    {[{l:'SPEED',v:`${bus.speed} km/h`},{l:'ETA',v:bus.eta},{l:'PAX',v:bus.pax}].map(x => (
+                      <div key={x.l} style={{background:'rgba(255,255,255,0.03)',border:`1px solid ${S.border}`,borderRadius:'7px',padding:'5px 4px',textAlign:'center'}}>
+                        <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'8px',fontWeight:500,marginBottom:'2px'}}>{x.l}</div>
+                        <div style={{fontFamily:"'DM Mono',monospace",color:'#38bdf8',fontSize:'11px',fontWeight:500}}>{x.v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:'flex',alignItems:'center',gap:'5px',color:'#475569',fontSize:'10px'}}>
+                    <div style={{width:'4px',height:'4px',borderRadius:'50%',background:rc,flexShrink:0}} />
+                    {bus.next}
+                  </div>
+                </button>
+              );
+            })}
+
+            {tab==='stops' && fstops.map(stop => {
+              const isSel = selStop?.id === stop.id;
+              return (
+                <button key={stop.id} onClick={()=>onStop(isSel?null:stop)} className="btn"
+                  style={{width:'100%',textAlign:'left',padding:'10px',borderRadius:'13px',marginBottom:'5px',cursor:'pointer',background:isSel?'rgba(56,189,248,0.08)':S.bg2,border:`1px solid ${isSel?'rgba(56,189,248,0.4)':S.border2}`,transition:'all 0.2s'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:'9px'}}>
+                    <div style={{width:'28px',height:'28px',borderRadius:'50%',border:'2.5px solid #38bdf8',background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,boxShadow:isSel?'0 0 12px #38bdf844':'none'}}>
+                      <div style={{width:'6px',height:'6px',borderRadius:'50%',background:'#38bdf8'}} />
+                    </div>
+                    <div>
+                      <div style={{color:'#e2e8f0',fontSize:'12px',fontWeight:600}}>{stop.name}</div>
+                      <div style={{display:'flex',gap:'4px',marginTop:'3px',flexWrap:'wrap'}}>
+                        {stop.routes.map(r => (
+                          <span key={r} style={{fontSize:'9px',padding:'1px 6px',borderRadius:'999px',fontWeight:600,fontFamily:"'DM Mono',monospace",background:(ROUTE_COLORS[r]||'#38bdf8')+'1a',color:ROUTE_COLORS[r]||'#38bdf8',border:`1px solid ${(ROUTE_COLORS[r]||'#38bdf8')}44`}}>{r}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* stats */}
+          <div style={{padding:'10px 12px',borderTop:`1px solid ${S.border}`,display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px'}}>
+            {[
+              {l:'On Time',v:buses.filter(b=>b.status==='On Time').length,c:'#4ade80'},
+              {l:'Delayed', v:buses.filter(b=>b.status==='Delayed').length,c:'#fb923c'},
+              {l:'Routes',  v:ROUTE_DEFS.length,c:'#38bdf8'},
+            ].map(s => (
+              <div key={s.l} style={{textAlign:'center',background:S.bg2,border:`1px solid ${S.border2}`,borderRadius:'10px',padding:'8px 4px'}}>
+                <div style={{fontFamily:"'DM Mono',monospace",color:s.c,fontSize:'22px',fontWeight:500,lineHeight:1}}>{s.v}</div>
+                <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'9px',textTransform:'uppercase',letterSpacing:'0.8px',marginTop:'3px'}}>{s.l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   BUS POPUP
+══════════════════════════════════════════════════════ */
+function BusPopup({ bus, onClose }) {
+  if (!bus) return null;
+  const route = ROUTE_DEFS.find(r => r.id === bus.rid);
+  const rc    = route?.color || '#38bdf8';
+  const iOT   = bus.status === 'On Time';
+  return (
+    <div className="anim-up" style={{position:'absolute',bottom:'28px',left:'50%',transform:'translateX(-50%)',marginLeft:'154px',zIndex:50,width:'318px',pointerEvents:'none'}}>
+      <div style={{pointerEvents:'auto',background:'linear-gradient(160deg,#162033,#0f172a)',border:'1px solid #1e293b',borderRadius:'20px',overflow:'hidden',boxShadow:`0 0 60px ${rc}15,0 28px 60px rgba(0,0,0,0.7)`}}>
+        <div style={{height:'3px',background:`linear-gradient(90deg,transparent,${rc},${rc}88,transparent)`}} />
+        <div style={{padding:'16px'}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'13px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
+              <div style={{width:'42px',height:'42px',borderRadius:'13px',flexShrink:0,background:`linear-gradient(145deg,${rc},${rc}b0)`,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:`0 4px 20px ${rc}44`}}>
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="white">
+                  <rect x="2" y="4" width="20" height="14" rx="3"/><rect x="4" y="2" width="16" height="4" rx="1"/>
+                  <circle cx="7" cy="20" r="2"/><circle cx="17" cy="20" r="2"/>
+                  <rect x="2" y="10" width="20" height="2" fill="rgba(0,0,0,0.15)"/>
+                  <rect x="5"  y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.45)"/>
+                  <rect x="10" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.45)"/>
+                  <rect x="15" y="6" width="3.5" height="2.5" rx="0.5" fill="rgba(255,255,255,0.45)"/>
+                </svg>
+              </div>
+              <div>
+                <div style={{fontFamily:"'DM Mono',monospace",color:'#e2e8f0',fontWeight:500,fontSize:'17px'}}>{bus.id}</div>
+                <div style={{color:'#475569',fontSize:'11px',marginTop:'1px'}}>{bus.route}</div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+              <span style={{fontSize:'10px',fontWeight:600,fontFamily:"'DM Mono',monospace",padding:'3px 10px',borderRadius:'999px',background:iOT?'rgba(74,222,128,0.1)':'rgba(251,146,60,0.1)',color:iOT?'#4ade80':'#fb923c',border:`1px solid ${iOT?'rgba(74,222,128,0.25)':'rgba(251,146,60,0.25)'}`}}>{bus.status}</span>
+              <button onClick={onClose} className="btn" style={{width:'25px',height:'25px',borderRadius:'50%',background:'#1e293b',border:'1px solid #334155',color:'#64748b',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'14px',cursor:'pointer',lineHeight:1}}>×</button>
+            </div>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px',marginBottom:'11px'}}>
+            {[{ico:'⚡',v:`${bus.speed}`,u:'km/h'},{ico:'⏱',v:bus.eta,u:'ETA'},{ico:'👥',v:bus.pax,u:'pax'}].map((x,i) => (
+              <div key={i} style={{background:'rgba(255,255,255,0.03)',border:'1px solid #1e293b',borderRadius:'12px',padding:'10px 6px',textAlign:'center'}}>
+                <div style={{fontSize:'18px',marginBottom:'4px'}}>{x.ico}</div>
+                <div style={{fontFamily:"'DM Mono',monospace",color:'#38bdf8',fontWeight:500,fontSize:'14px'}}>{x.v}</div>
+                <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'9px',marginTop:'2px'}}>{x.u}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:`${rc}0a`,border:`1px solid ${rc}25`,borderRadius:'12px',padding:'11px 13px',display:'flex',alignItems:'center',gap:'11px'}}>
+            <div style={{width:'34px',height:'34px',borderRadius:'50%',border:`2px solid ${rc}`,background:'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,boxShadow:`0 0 10px ${rc}30`}}>
+              <div style={{width:'8px',height:'8px',borderRadius:'50%',background:rc}} />
+            </div>
+            <div>
+              <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'9px',letterSpacing:'0.8px'}}>NEXT STOP</div>
+              <div style={{color:'#e2e8f0',fontSize:'13px',fontWeight:600,marginTop:'2px'}}>{bus.next}</div>
+            </div>
+            <div style={{marginLeft:'auto',textAlign:'right'}}>
+              <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'9px',letterSpacing:'0.8px'}}>ARRIVES IN</div>
+              <div style={{fontFamily:"'DM Mono',monospace",color:rc,fontWeight:500,fontSize:'17px',marginTop:'2px'}}>{bus.eta}</div>
+            </div>
+          </div>
+          <div style={{marginTop:'8px',fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'9px',display:'flex',gap:'5px',alignItems:'center'}}>
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#334155" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>
+            {bus.lat.toFixed(5)}, {bus.lng.toFixed(5)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   STOP POPUP
+══════════════════════════════════════════════════════ */
+function StopPopup({ stop, buses, onClose }) {
+  if (!stop) return null;
+  const arrivals = calcArrivals(stop.id, buses);
+  return (
+    <div className="anim-up" style={{position:'absolute',top:'20px',right:'20px',zIndex:50,width:'268px',pointerEvents:'none'}}>
+      <div style={{pointerEvents:'auto',background:'linear-gradient(160deg,#162033,#0f172a)',border:'1px solid #1e293b',borderRadius:'20px',overflow:'hidden',boxShadow:'0 0 50px rgba(56,189,248,0.08),0 24px 60px rgba(0,0,0,0.7)'}}>
+        <div style={{height:'3px',background:'linear-gradient(90deg,transparent,#38bdf8,#7dd3fc88,transparent)'}} />
+        <div style={{padding:'14px'}}>
+          <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:'10px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'9px'}}>
+              <div style={{width:'36px',height:'36px',borderRadius:'11px',background:'rgba(56,189,248,0.08)',border:'1px solid rgba(56,189,248,0.2)',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                <div style={{width:'13px',height:'13px',borderRadius:'50%',border:'2.5px solid #38bdf8',background:'#0f172a'}} />
+              </div>
+              <div>
+                <div style={{color:'#e2e8f0',fontWeight:600,fontSize:'13px'}}>{stop.name}</div>
+                <div style={{color:'#475569',fontSize:'10px',marginTop:'2px'}}>Bus Stop</div>
+              </div>
+            </div>
+            <button onClick={onClose} className="btn" style={{width:'22px',height:'22px',borderRadius:'50%',background:'#1e293b',border:'1px solid #334155',color:'#475569',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'13px',cursor:'pointer',flexShrink:0,lineHeight:1}}>×</button>
+          </div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:'4px',marginBottom:'11px'}}>
+            {stop.routes.map(r => (
+              <span key={r} style={{fontSize:'9px',padding:'2px 7px',borderRadius:'999px',fontWeight:600,fontFamily:"'DM Mono',monospace",background:(ROUTE_COLORS[r]||'#38bdf8')+'1a',color:ROUTE_COLORS[r]||'#38bdf8',border:`1px solid ${(ROUTE_COLORS[r]||'#38bdf8')}44`}}>{r}</span>
+            ))}
+          </div>
+          <div style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'9px',fontWeight:500,marginBottom:'8px',letterSpacing:'0.8px'}}>INCOMING BUSES</div>
+          {arrivals.length === 0
+            ? <div style={{color:'#475569',fontSize:'12px',fontStyle:'italic',textAlign:'center',padding:'10px 0'}}>No buses approaching</div>
+            : <div style={{display:'flex',flexDirection:'column',gap:'5px'}}>
+                {arrivals.map(a => {
+                  const route = ROUTE_DEFS.find(r => r.id === a.rid);
+                  const color = route?.color || '#38bdf8';
+                  return (
+                    <div key={a.busId} style={{display:'flex',alignItems:'center',gap:'8px',background:'rgba(255,255,255,0.02)',border:'1px solid #1e293b',borderRadius:'10px',padding:'8px 10px'}}>
+                      <div style={{width:'6px',height:'6px',borderRadius:'50%',flexShrink:0,background:color,boxShadow:`0 0 6px ${color}`}} />
+                      <div style={{width:'26px',height:'26px',borderRadius:'8px',background:color+'18',border:`1px solid ${color}33`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill={color}><rect x="2" y="4" width="20" height="14" rx="3"/><rect x="4" y="2" width="16" height="4" rx="1"/><circle cx="7" cy="20" r="2"/><circle cx="17" cy="20" r="2"/></svg>
+                      </div>
+                      <span style={{fontFamily:"'DM Mono',monospace",color:'#38bdf8',fontSize:'12px',fontWeight:500,flex:1}}>{a.busId}</span>
+                      <span style={{fontFamily:"'DM Mono',monospace",color,fontSize:'12px',fontWeight:500}}>{a.eta}</span>
+                    </div>
+                  );
+                })}
+              </div>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   LEGEND + STATUS BAR
+══════════════════════════════════════════════════════ */
+function Legend({ selRoute, onRoute }) {
+  return (
+    <div style={{position:'absolute',bottom:'28px',left:'50%',transform:'translateX(-50%)',marginLeft:'154px',zIndex:20,pointerEvents:'auto',background:'rgba(15,23,42,0.92)',backdropFilter:'blur(12px)',border:'1px solid #1e293b',borderRadius:'14px',padding:'9px 16px',display:'flex',gap:'14px',alignItems:'center',boxShadow:'0 4px 24px rgba(0,0,0,0.5)'}}>
+      {ROUTE_DEFS.map(r => (
+        <button key={r.id} onClick={()=>onRoute(selRoute===r.id?null:r.id)} className="btn" style={{display:'flex',alignItems:'center',gap:'6px',opacity:selRoute&&selRoute!==r.id?0.2:1,background:'none',border:'none',transition:'opacity 0.2s'}}>
+          <div style={{width:'18px',height:'3px',borderRadius:'2px',background:r.color,boxShadow:`0 0 7px ${r.color}99`}} />
+          <span style={{fontFamily:"'DM Mono',monospace",color:'#64748b',fontSize:'11px'}}>{r.name}</span>
+        </button>
+      ))}
+      <div style={{width:'1px',height:'14px',background:'#1e293b'}} />
+      <div style={{display:'flex',alignItems:'center',gap:'5px'}}>
+        <div style={{width:'9px',height:'9px',borderRadius:'50%',border:'2px solid #38bdf8'}} />
+        <span style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'11px'}}>Stop</span>
+      </div>
+    </div>
+  );
+}
+
+function StatusBar({ buses, running }) {
+  const [time, setTime] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div style={{position:'absolute',top:'18px',left:'50%',transform:'translateX(-50%)',zIndex:20,pointerEvents:'none',background:'rgba(15,23,42,0.88)',backdropFilter:'blur(12px)',border:'1px solid #1e293b',borderRadius:'999px',padding:'7px 18px',display:'flex',alignItems:'center',gap:'10px',boxShadow:'0 4px 20px rgba(0,0,0,0.5)'}}>
+      <div className="blink" style={{width:'7px',height:'7px',borderRadius:'50%',flexShrink:0,background:running?'#4ade80':'#f87171',boxShadow:`0 0 8px ${running?'#4ade80':'#f87171'}`}} />
+      <span style={{color:'#38bdf8',fontSize:'12px',fontWeight:500}}>{buses.length} buses live</span>
+      <span style={{color:'#1e293b'}}>·</span>
+      <span style={{fontFamily:"'DM Mono',monospace",color:'#475569',fontSize:'11px'}}>{time.toLocaleTimeString()}</span>
+      <span style={{color:'#1e293b'}}>·</span>
+      <span style={{fontFamily:"'DM Mono',monospace",color:'#334155',fontSize:'10px',display:'flex',alignItems:'center',gap:'3px'}}>
+        <svg width="9" height="10" viewBox="0 0 24 24" fill="#334155"><path d="M17 8C8 10 5.9 16.17 3.82 21.34L5.71 22l1-2.3A4.49 4.49 0 008 20c9 0 14-8 14-8S18 10 17 8z"/></svg>
+        OSM · OSRM
+      </span>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   APP — root component, fetches OSRM routes on mount
+══════════════════════════════════════════════════════ */
+function App() {
+  const [routeCoords, setRouteCoords] = useState({});
+  const [loadStatus,  setLoadStatus]  = useState('Fetching road routes from OpenStreetMap…');
+  const [loaded,      setLoaded]      = useState(false);
+
+  const [selBus,   setSelBus]   = useState(null);
+  const [selStop,  setSelStop]  = useState(null);
+  const [selRoute, setSelRoute] = useState(null);
+  const [open,     setOpen]     = useState(true);
+
+  const { buses, running, toggle } = useSimulation(routeCoords);
+
+  /* Fetch all OSRM routes in parallel */
+  useEffect(() => {
+    async function loadRoutes() {
+      const results = {};
+      for (const def of ROUTE_DEFS) {
+        try {
+          setLoadStatus(`Loading ${def.name}: ${def.label}…`);
+          const coords = await fetchOSRMRoute(def.viaPoints);
+          results[def.id] = coords;
+        } catch (err) {
+          console.warn(`OSRM failed for ${def.id}, using fallback`, err);
+          // Fallback to straight-line waypoints if OSRM is down
+          results[def.id] = def.viaPoints;
+        }
+      }
+      setRouteCoords(results);
+      setLoadStatus('Routes loaded!');
+      setTimeout(() => setLoaded(true), 400);
+    }
+    loadRoutes();
+  }, []);
+
+  const pickBus  = b => { setSelBus(b);  setSelStop(null); };
+  const pickStop = s => { setSelStop(s); setSelBus(null);  };
+
+  return (
+    <div style={{position:'relative',width:'100%',height:'100%'}}>
+
+      {/* Loading screen */}
+      {!loaded && <LoadingOverlay status={loadStatus} />}
+
+      {/* Map */}
+      <MapView
+        buses={buses} routeCoords={routeCoords}
+        selBus={selBus} selStop={selStop} selRoute={selRoute}
+        onBusClick={pickBus} onStopClick={pickStop}
+      />
+
+      {/* UI overlay */}
+      {loaded && (
+        <div style={{position:'absolute',inset:0,zIndex:10,pointerEvents:'none'}}>
+          <div style={{pointerEvents:'auto'}}>
+            <Sidebar
+              buses={buses} selBus={selBus} selStop={selStop} selRoute={selRoute}
+              onBus={b  => pickBus(selBus?.id===b?.id?null:b)}
+              onStop={s => pickStop(selStop?.id===s?.id?null:s)}
+              onRoute={setSelRoute}
+              open={open} onToggle={() => setOpen(v => !v)}
+              running={running} onPause={toggle}
+            />
+          </div>
+
+          <StatusBar buses={buses} running={running} />
+
+          {selBus && !selStop && (
+            <div style={{pointerEvents:'auto'}}>
+              <BusPopup bus={selBus} onClose={() => setSelBus(null)} />
+            </div>
+          )}
+
+          {selStop && (
+            <div style={{pointerEvents:'auto'}}>
+              <StopPopup stop={selStop} buses={buses} onClose={() => setSelStop(null)} />
+            </div>
+          )}
+
+          {!selBus && (
+            <div style={{pointerEvents:'auto'}}>
+              <Legend selRoute={selRoute} onRoute={setSelRoute} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
